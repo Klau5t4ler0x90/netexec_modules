@@ -4,7 +4,7 @@ The module recursively searches SMB shares for files with potential passwords.
 This python script is an additional module for NetExec from Pennyw0rth.
 You can speed up your Penetrationtests. Read the files and print the passwords and usernames.
 
-The module filters all files with the endings [.cmd", ".bat", ".ps1", ".inf", ".info", ".psd"] from the SMB shares.
+The module filters all files with the endings [".cmd", ".bat", ".ps1", ".inf", ".info", ".psd"] from the SMB shares.
 
 Use this module by downloading the python script and copying it to the appropriate directory.
 When the program (nxc/Netexec) is executed, the module is integrated into the list of SMB modules. Check it out with "nxc smb -L"
