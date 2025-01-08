@@ -21,4 +21,4 @@ sudo cp password_spider.py /usr/lib/python3/dist-packages/nxc/modules/password_s
 
 Thanks to pennyw0rth and the whole team for this great tool.
 
-How it works? [Wiki] (Wiki)
+How it works? [Wiki](https://github.com/Klau5t4ler0x90/password_spider/wiki/password_spider)
