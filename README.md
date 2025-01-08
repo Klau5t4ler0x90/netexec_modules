@@ -17,7 +17,9 @@ When the program (nxc/Netexec) is executed, the module is integrated into the li
 
 Path to copy in Kali Linux is: /usr/lib/python3/dist-packages/nxc/modules/
 
+```shell
 sudo cp password_spider.py /usr/lib/python3/dist-packages/nxc/modules/password_spider.py
+```
 
 Thanks to pennyw0rth and the whole team for this great tool.
 
