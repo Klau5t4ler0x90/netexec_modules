@@ -21,6 +21,6 @@ Path to copy in Kali Linux is: /usr/lib/python3/dist-packages/nxc/modules/
 sudo cp password_spider.py /usr/lib/python3/dist-packages/nxc/modules/password_spider.py
 ```
 
-Thanks to pennyw0rth and the whole team for this great tool.
+Thanks to [Pennyw0rth](https://github.com/Pennyw0rth/NetExec) and the whole team for this great tool.
 
 How it works? [Wiki](https://github.com/Klau5t4ler0x90/password_spider/wiki/password_spider)
