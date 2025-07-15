@@ -1,92 +1,141 @@
+from pathlib import Path, PurePosixPath
+from io import BytesIO
 import re
+import csv
+from typing import Iterable, Set, Tuple, List, Dict, Optional
+
+# ---------------------------------------------------------------------------
+# Helper utils (shared with logon_scripts_enum)
+# ---------------------------------------------------------------------------
+
+def _entry_name(entry):
+    for cand in ("filename", "longname", "name", "get_longname"):
+        if hasattr(entry, cand):
+            attr = getattr(entry, cand)
+            return attr() if callable(attr) else attr
+    return ""
+
+def _is_dir(entry):
+    for cand in ("isDirectory", "is_directory", "is_dir"):
+        if hasattr(entry, cand):
+            method = getattr(entry, cand)
+            return method() if callable(method) else bool(method)
+    if hasattr(entry, "smbAttributes") and hasattr(entry.smbAttributes, "isDirectory"):
+        return entry.smbAttributes.isDirectory()
+    return False
+
+# ---------------------------------------------------------------------------
+# Regex patterns for plaintext credentials
+# ---------------------------------------------------------------------------
+
+_PATTERNS = [
+    # net use \\srv\share /user:USER PASS
+    re.compile(r"net\s+use\s+\\\\\S+\s+/user:(?P<user>\S+)\s+(?P<pw>\S+)", re.I),
+
+    # PowerShell ConvertTo-SecureString -AsPlainText PASS
+    re.compile(r"-AsPlainText\s+(?P<pw>\S+)", re.I),
+
+    # key = value pairs ($user = "DOMAIN\\bob")
+    re.compile(r"\$?user\s*=\s*['\"]?(?P<user>[^'\"\r\n]+)", re.I),
+
+    # password = value, passwd=, pwd=
+    re.compile(r"\$?pass(?:word|wd)?\s*=\s*['\"]?(?P<pw>[^'\"\r\n]+)", re.I),
+]
+
+_EXTS = {'.bat', '.cmd', '.ps1', '.vbs', '.kix'}
 
 class NXCModule:
-    """
-    Optimized version to search all SMB shares for specific files and look for credentials in files.
-    """
+    """Scan SYSVOL/NETLOGON script files for plaintext credentials."""
 
-    name = "password_spider"
-    description = "Searches all SMB shares (except IPC$) for specific files and looks for credentials within those files."
+    name = "logon_creds_scan"
+    description = "Enumerate logon-script files and search for plaintext credentials"
     supported_protocols = ["smb"]
     opsec_safe = True
-    multiple_hosts = True
+    multiple_hosts = False
 
+    def __init__(self):
+        self.save_dir: Optional[Path] = None
+        self.findings: List[Dict[str, str]] = []
+
+    # ----------------------------- Options ----------------------------- #
     def options(self, context, module_options):
-        """ Method for additional options (if needed) """
+        save = module_options.get("SAVE")
+        if save:
+            self.save_dir = Path(save).expanduser().resolve()
+            self.save_dir.mkdir(parents=True, exist_ok=True)
 
+    # ------------------------------ Core ------------------------------- #
     def on_login(self, context, connection):
-        # Get all SMB shares
-        shares = connection.shares()
+        smb = connection.conn
+        domain = connection.domain or connection.hostname or connection.host
+        share = "SYSVOL"
+        root  = f"{domain}/scripts"
 
-        # Iterate over shares
-        for share in shares:
-            share_name = share["name"]
+        context.log.display(f"Collecting logon-script files from /{share}/{root} …")
+        script_files = list(self._iter_files(smb, share, root, _EXTS))
+        context.log.display(f"{len(script_files)} script file(s) collected")
 
-            # Skip IPC$ share
-            if share_name == "IPC$":
+        for sh, rel_path in script_files:
+            data = self._read_file(smb, sh, rel_path)
+            if not data:
                 continue
+            for pat in _PATTERNS:
+                for m in pat.finditer(data):
+                    user = m.groupdict().get("user", "")
+                    pw   = m.groupdict().get("pw", "")
+                    self._report(context, connection, sh, rel_path, user, pw)
 
-            # Log the found share
-            context.log.success(f"Found share: {share_name}")
+        if not self.findings:
+            context.log.display("No plaintext credentials found")
 
-            # Search for files with the specified extensions
-            context.log.display("Searching for specific files in share...")
-            paths = connection.spider(share_name, pattern=[".cmd", ".bat", ".ps1", ".inf", ".info", ".psd"])
+        if self.save_dir and self.findings:
+            out = self.save_dir / "credentials.csv"
+            with out.open("w", newline="") as fh:
+                writer = csv.DictWriter(fh, fieldnames=self.findings[0].keys())
+                writer.writeheader()
+                writer.writerows(self.findings)
+            context.log.success(f"Credentials CSV written to {out}")
 
-            # Iterate over found files
-            for path in paths:
-                context.log.display(f"Found file: {path}")
+    # --------------------------- SMB helpers --------------------------- #
+    def _iter_files(self, smb, share: str, path: str, exts: Set[str]) -> Iterable[Tuple[str, str]]:
+        try:
+            win_path = path.replace('/', '\\')
+            dir_list = smb.listPath(share, win_path + '\\*')
+        except Exception:
+            return []
 
-                # Fetch the file content
-                buf = BytesIO()
-                connection.conn.getFile(share_name, path, buf.write)
-                file_content = buf.getvalue().decode(errors="ignore")  # Ensure text encoding issues are handled
+        for entry in dir_list:
+            name = _entry_name(entry)
+            if name in {'.', '..'}:
+                continue
+            rel_path = f"{path}/{name}" if path else name
+            if _is_dir(entry):
+                yield from self._iter_files(smb, share, rel_path, exts)
+            else:
+                if Path(name).suffix.lower() in exts:
+                    yield share, rel_path
 
-                # Search for credentials in the file content using regular expressions
-                self.search_for_credentials(file_content, context, path)
+    def _read_file(self, smb, share: str, path: str) -> str:
+        win_path = path.replace('/', '\\')
+        try:
+            buf = BytesIO()
+            smb.getFile(share, win_path, buf.write)
+            return buf.getvalue().decode(errors='ignore')
+        except Exception:
+            try:
+                fh = smb.openFile(share, win_path, desired_access=0x80)
+                data = smb.readFile(share, fh)
+                smb.closeFile(share, fh)
+                return data.decode(errors='ignore')
+            except Exception:
+                return ""
 
-    def search_for_credentials(self, file_content, context, file_path):
-        """
-        Search the file content for potential credentials.
-        """
-        # Define patterns to search for, including domain/username and password pairs
-        patterns = [
-            r"([A-Za-z0-9_-]+\\[A-Za-z0-9_-]+)",  # Domain\Username
-            r"(?:user|username|login)[\s:=]*([A-Za-z0-9_@.-]+)",  # user=username, username: user, etc.
-            r"(?:pass|password)[\s:=]*([A-Za-z0-9!@#$%^&*()_+={}\[\];:,.<>?/-]+)",  # pass=xxxx or password=xxx
-            r"(?:domain)[\s:=]*([A-Za-z0-9_]+)",  # domain=xxx
-            r"([A-Za-z0-9]+)\\([A-Za-z0-9]+)[\s:=]*([A-Za-z0-9!@#$%^&*()_+={}\[\];:,.<>?/-]+)",  # domain\username password format
-            r"%USERNAME%",  # Possible environment variable for username
-            r"%USERDOMAIN%",  # Possible environment variable for domain
-            r"%PASSWORD%",  # Possible environment variable for password
-            r"net use \\\.* /user:(\S+)",  # net use with a username
-            r"password\s*=\s*['\"](.*?)['\"]",  # generic password pattern
-            r"runas /user:(\S+)",  # runas command
-            r"net groups.* /domain",  # net groups command
-            r"net share.* /domain",  # net share command
-            r"Domain:\s*(\S+)",  # Generic domain patterns
-        ]
-
-        found_usernames = []
-        found_passwords = []
-        found_domains = []
-
-        # Search for usernames, passwords, and domains using the patterns
-        for pattern in patterns:
-            for match in re.finditer(pattern, file_content, re.IGNORECASE):
-                if pattern in [patterns[0], patterns[1], patterns[4]]:
-                    found_usernames.append(match.group(1))
-                elif pattern in [patterns[2]]:
-                    found_passwords.append(match.group(1))
-                elif pattern in [patterns[3]]:
-                    found_domains.append(match.group(1))
-
-        # Log found credentials
-        if found_usernames or found_passwords or found_domains:
-            context.log.success(f"Found credentials in {file_path}")
-            if found_usernames:
-                context.log.highlight(f"Usernames: {found_usernames}")
-            if found_domains:
-                context.log.highlight(f"Domains: {found_domains}")
-            if found_passwords:
-                context.log.highlight(f"Passwords: {found_passwords}")
+    # --------------------------- Reporting ----------------------------- #
+    def _report(self, context, connection, share: str, rel_path: str, user: str, pw: str):
+        linux_path = f"//{connection.hostname}/{share}/{PurePosixPath(rel_path)}"
+        context.log.highlight(f"CREDENTIAL | {linux_path} | user={user} pw={pw}")
+        self.findings.append({
+            "File": linux_path,
+            "User": user,
+            "Password": pw
+        })
